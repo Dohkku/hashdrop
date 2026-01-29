@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(forge:*)",
+      "Bash(where:*)",
+      "Bash(export PATH=\"$HOME/.foundry/bin:$PATH\")",
+      "Bash(npm install)",
+      "Bash(npm run dev:*)"
+    ]
+  }
+}
