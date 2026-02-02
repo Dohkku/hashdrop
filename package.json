@@ -1,0 +1,25 @@
+{
+  "name": "hashdrop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "P2P Decentralized Delivery Platform",
+  "scripts": {
+    "dev": "cd web && npm run dev",
+    "build": "cd web && npm run build",
+    "contracts:build": "cd contracts && forge build",
+    "contracts:test": "cd contracts && forge test",
+    "contracts:test:verbose": "cd contracts && forge test -vvv",
+    "circuits:compile": "cd circuits && npm run compile",
+    "circuits:setup": "cd circuits && npm run setup"
+  },
+  "keywords": [
+    "web3",
+    "blockchain",
+    "delivery",
+    "p2p",
+    "escrow",
+    "zk-proofs"
+  ],
+  "author": "",
+  "license": "MIT"
+}
