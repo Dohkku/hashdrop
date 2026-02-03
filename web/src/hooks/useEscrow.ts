@@ -169,6 +169,34 @@ export function useConfirmDelivery() {
   };
 }
 
+// Hook to confirm pickup
+export function useConfirmPickup() {
+  const chainId = useChainId();
+  const { writeContract, data: hash, isPending, error } = useWriteContract();
+
+  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
+    hash,
+  });
+
+  const confirmPickup = (orderId: bigint, emitterSignature: `0x${string}`) => {
+    writeContract({
+      address: getContractAddress(chainId, "escrow"),
+      abi: ESCROW_ABI,
+      functionName: "confirmPickup",
+      args: [orderId, emitterSignature],
+    });
+  };
+
+  return {
+    confirmPickup,
+    isPending,
+    isConfirming,
+    isSuccess,
+    hash,
+    error,
+  };
+}
+
 // Hook to cancel an order
 export function useCancelOrder() {
   const chainId = useChainId();

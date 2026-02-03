@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { keccak256, encodePacked, toHex } from "viem";
 import { useCreateOrder, parseUSDC, formatUSDC } from "@/hooks/useEscrow";
 import { generateDeliverySecret, secretToQRData } from "@/lib/zk";
+import { QRGenerator } from "@/components/QRGenerator";
 
 export default function SendPage() {
   const { address, isConnected } = useAccount();
@@ -31,10 +32,10 @@ export default function SendPage() {
   const [step, setStep] = useState<"form" | "confirm" | "success">("form");
 
   // Calculate fees
-  const packageValue = form.packageValue ? parseUSDC(form.packageValue) : 0n;
-  const deliveryFee = form.deliveryFee ? parseUSDC(form.deliveryFee) : 0n;
-  const protocolFee = (packageValue * 100n) / 10000n; // 1%
-  const insuranceFee = (packageValue * 50n) / 10000n; // 0.5%
+  const packageValue = form.packageValue ? parseUSDC(form.packageValue) : BigInt(0);
+  const deliveryFee = form.deliveryFee ? parseUSDC(form.deliveryFee) : BigInt(0);
+  const protocolFee = (packageValue * BigInt(100)) / BigInt(10000); // 1%
+  const insuranceFee = (packageValue * BigInt(50)) / BigInt(10000); // 0.5%
   const totalDeposit = packageValue + deliveryFee + protocolFee + insuranceFee;
 
   const handleGenerateSecret = async () => {
@@ -84,27 +85,39 @@ export default function SendPage() {
   if (isSuccess) {
     return (
       <div className="max-w-2xl mx-auto px-4 py-12">
-        <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-8 text-center">
-          <div className="text-5xl mb-4">✅</div>
-          <h2 className="text-2xl font-bold text-green-700 dark:text-green-400 mb-4">
-            Orden Creada
-          </h2>
-          <p className="text-gray-600 dark:text-gray-400 mb-6">
-            Tu orden ha sido creada. Guarda el codigo QR para darselo al receptor.
-          </p>
+        <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-xl p-8">
+          <div className="text-center mb-6">
+            <div className="text-5xl mb-4">✅</div>
+            <h2 className="text-2xl font-bold text-green-700 dark:text-green-400 mb-2">
+              Orden Creada
+            </h2>
+            <p className="text-gray-600 dark:text-gray-400">
+              Comparte este codigo QR con el receptor para que pueda confirmar la entrega.
+            </p>
+          </div>
 
           {generatedSecret && (
-            <div className="bg-white dark:bg-gray-800 p-4 rounded-lg mb-6">
-              <p className="text-sm text-gray-500 mb-2">Codigo secreto (guardar):</p>
-              <code className="text-xs break-all block p-2 bg-gray-100 dark:bg-gray-900 rounded">
-                {generatedSecret.secret.toString()}
-              </code>
+            <div className="bg-white dark:bg-gray-800 p-6 rounded-xl mb-6">
+              <QRGenerator
+                secret={generatedSecret.secret}
+                orderId="nueva"
+                receiverAddress={form.receiverAddress}
+                size={220}
+                showSecret={true}
+              />
             </div>
           )}
 
+          <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4 mb-6">
+            <p className="text-sm text-yellow-800 dark:text-yellow-200">
+              <strong>Importante:</strong> Guarda este codigo QR o el secreto.
+              El receptor lo necesitara para confirmar la entrega.
+            </p>
+          </div>
+
           <button
             onClick={() => router.push("/orders")}
-            className="px-6 py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600"
+            className="w-full py-3 bg-primary-500 text-white rounded-lg hover:bg-primary-600 font-medium"
           >
             Ver Mis Ordenes
           </button>
@@ -213,7 +226,7 @@ export default function SendPage() {
           </div>
 
           {/* Cost Summary */}
-          {packageValue > 0n && (
+          {packageValue > BigInt(0) && (
             <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
               <h3 className="font-semibold mb-2 text-gray-900 dark:text-white">
                 Resumen de Costos

@@ -22,7 +22,7 @@ export default function DeliverPage() {
   const recentOrderIds = Array.from(
     { length: Math.min(20, totalOrders) },
     (_, i) => BigInt(totalOrders - 1 - i)
-  ).filter((id) => id >= 0n);
+  ).filter((id) => id >= BigInt(0));
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-12">
@@ -95,7 +95,7 @@ function AvailableOrderCard({
     return null;
   }
 
-  const collateralRequired = (orderData.packageValue * 110n) / 100n;
+  const collateralRequired = (orderData.packageValue * BigInt(110)) / BigInt(100);
 
   const handleAccept = () => {
     acceptOrder(orderId);
