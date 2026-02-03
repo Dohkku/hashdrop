@@ -5,7 +5,20 @@
       "Bash(where:*)",
       "Bash(export PATH=\"$HOME/.foundry/bin:$PATH\")",
       "Bash(npm install)",
-      "Bash(npm run dev:*)"
+      "Bash(npm run dev:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(ls -la \"C:\\\\Users\\\\frederick.andrade\\\\dev\\\\hashdrop\\\\contracts\"\" | grep -E \"foundry)",
+      "Bash(.toml \")",
+      "Bash(npm run build:*)",
+      "Bash(curl:*)",
+      "Bash(bash:*)",
+      "Bash(source ~/.bashrc)",
+      "Bash(foundryup:*)",
+      "Bash(~/.foundry/versions/stable/forge.exe script:*)",
+      "Bash(~/.foundry/versions/stable/cast.exe send:*)",
+      "Bash(git checkout:*)"
     ]
   }
 }
