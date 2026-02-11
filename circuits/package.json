@@ -8,12 +8,15 @@
     "setup:ptau": "snarkjs powersoftau new bn128 14 build/pot14_0000.ptau -v && snarkjs powersoftau contribute build/pot14_0000.ptau build/pot14_0001.ptau --name=\"First contribution\" -v -e=\"random entropy\" && snarkjs powersoftau prepare phase2 build/pot14_0001.ptau build/pot14_final.ptau -v",
     "setup:zkey": "snarkjs groth16 setup build/DeliveryProof.r1cs build/pot14_final.ptau build/DeliveryProof_0000.zkey && snarkjs zkey contribute build/DeliveryProof_0000.zkey build/DeliveryProof_final.zkey --name=\"Contributor\" -v -e=\"more random\" && snarkjs zkey export verificationkey build/DeliveryProof_final.zkey build/verification_key.json",
     "export:verifier": "snarkjs zkey export solidityverifier build/DeliveryProof_final.zkey ../contracts/src/verifiers/DeliveryVerifier.sol",
-    "test": "node test/proof.test.js"
+    "test": "mocha test/DeliveryProof.test.js --timeout 60000",
+    "copy:artifacts": "cp build/DeliveryProof_js/DeliveryProof.wasm ../web/public/circuits/ && cp build/DeliveryProof_final.zkey ../web/public/circuits/ && cp build/verification_key.json ../web/public/circuits/"
   },
   "dependencies": {
     "circomlib": "^2.0.5",
+    "circomlibjs": "^0.1.7",
     "snarkjs": "^0.7.4"
   },
   "devDependencies": {
+    "mocha": "^10.2.0"
   }
 }

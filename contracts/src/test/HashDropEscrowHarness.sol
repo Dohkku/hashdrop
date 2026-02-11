@@ -24,6 +24,13 @@ contract HashDropEscrowHarness is HashDropEscrow {
         }
     }
 
+    /// @notice Test helper to set pickedUpAt timestamp directly
+    /// @dev Only for testing - bypasses normal flow
+    function setPickedUpAt(uint256 orderId, uint256 timestamp) external {
+        Order storage order = _orders[orderId];
+        order.pickedUpAt = timestamp;
+    }
+
     /// @notice Expose internal orders mapping for testing
     function getOrderInternal(uint256 orderId) external view returns (Order memory) {
         return _orders[orderId];

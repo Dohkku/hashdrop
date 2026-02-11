@@ -19,25 +19,41 @@ interface ProofResult {
   publicSignals: string[];
 }
 
-// Poseidon hash implementation (matches circomlib)
-// We need this to compute the secretHash off-chain
+// Poseidon hasher instance (lazy initialized)
+let poseidonInstance: ((inputs: bigint[]) => bigint) | null = null;
+
+/**
+ * Initialize the Poseidon hash function from circomlibjs
+ * This matches the Poseidon implementation used in circom circuits
+ */
+async function initPoseidon(): Promise<(inputs: bigint[]) => bigint> {
+  if (poseidonInstance) {
+    return poseidonInstance;
+  }
+
+  // Dynamic import to avoid SSR issues
+  const { buildPoseidon } = await import("circomlibjs");
+  const poseidon = await buildPoseidon();
+
+  poseidonInstance = (inputs: bigint[]): bigint => {
+    const hash = poseidon(inputs);
+    // Convert F element to bigint
+    return poseidon.F.toObject(hash);
+  };
+
+  return poseidonInstance;
+}
+
+/**
+ * Compute Poseidon hash of inputs
+ * This matches the hash function used in the circom DeliveryProof circuit
+ *
+ * @param inputs - Array of bigints to hash
+ * @returns The Poseidon hash as a bigint
+ */
 export async function poseidonHash(inputs: bigint[]): Promise<bigint> {
-  // In production, use the actual circomlibjs poseidon
-  // For now, we'll use a simple keccak256 fallback
-  // TODO: Import circomlibjs poseidon for proper implementation
-  const { keccak256, encodePacked } = await import("viem");
-
-  const packed = encodePacked(
-    inputs.map(() => "uint256" as const),
-    inputs
-  );
-  const hash = keccak256(packed);
-
-  // Convert to field element (mod p for BN254)
-  const p = BigInt(
-    "21888242871839275222246405745257275088548364400416034343698204186575808495617"
-  );
-  return BigInt(hash) % p;
+  const hash = await initPoseidon();
+  return hash(inputs);
 }
 
 /**
@@ -58,10 +74,28 @@ export async function generateDeliverySecret(): Promise<{
     secret = (secret << BigInt(8)) | BigInt(randomBytes[i]);
   }
 
-  // Compute hash
+  // Compute Poseidon hash (matches circuit)
   const secretHash = await poseidonHash([secret]);
 
   return { secret, secretHash };
+}
+
+/**
+ * Convert a bigint to bytes32 hex string for smart contract
+ * @param value - BigInt value
+ * @returns bytes32 hex string with 0x prefix
+ */
+export function bigintToBytes32(value: bigint): `0x${string}` {
+  return `0x${value.toString(16).padStart(64, "0")}` as `0x${string}`;
+}
+
+/**
+ * Convert a bytes32 hex string to bigint
+ * @param hex - bytes32 hex string with 0x prefix
+ * @returns BigInt value
+ */
+export function bytes32ToBigint(hex: string): bigint {
+  return BigInt(hex);
 }
 
 /**
@@ -110,6 +144,7 @@ export async function generateDeliveryProof(
   );
 
   // Format proof for Solidity verifier
+  // Note: The b array needs to be transposed for Solidity
   return {
     proof: {
       a: [proof.pi_a[0], proof.pi_a[1]] as [string, string],
@@ -141,6 +176,22 @@ export async function verifyProof(
 }
 
 /**
+ * Verify that a secret matches a given hash
+ * Used to validate QR code data before generating proof
+ *
+ * @param secret - The secret from QR code
+ * @param expectedHash - The hash stored on-chain
+ * @returns true if secret hashes to expectedHash
+ */
+export async function verifySecretHash(
+  secret: bigint,
+  expectedHash: bigint
+): Promise<boolean> {
+  const computedHash = await poseidonHash([secret]);
+  return computedHash === expectedHash;
+}
+
+/**
  * Format a bigint secret for display in QR code
  */
 export function secretToQRData(
@@ -153,6 +204,7 @@ export function secretToQRData(
     o: orderId,
     r: receiverAddress,
     t: Date.now(),
+    v: 1, // Version for future compatibility
   };
   return btoa(JSON.stringify(payload));
 }
@@ -165,6 +217,7 @@ export function parseQRData(qrData: string): {
   orderId: string;
   receiverAddress: string;
   timestamp: number;
+  version?: number;
 } | null {
   try {
     const json = atob(qrData);
@@ -174,8 +227,32 @@ export function parseQRData(qrData: string): {
       orderId: payload.o,
       receiverAddress: payload.r,
       timestamp: payload.t,
+      version: payload.v,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Format proof data for smart contract call
+ * Converts string arrays to the format expected by the verifier contract
+ */
+export function formatProofForContract(proof: {
+  a: [string, string];
+  b: [[string, string], [string, string]];
+  c: [string, string];
+}): {
+  pA: [bigint, bigint];
+  pB: [[bigint, bigint], [bigint, bigint]];
+  pC: [bigint, bigint];
+} {
+  return {
+    pA: [BigInt(proof.a[0]), BigInt(proof.a[1])],
+    pB: [
+      [BigInt(proof.b[0][0]), BigInt(proof.b[0][1])],
+      [BigInt(proof.b[1][0]), BigInt(proof.b[1][1])],
+    ],
+    pC: [BigInt(proof.c[0]), BigInt(proof.c[1])],
+  };
 }
