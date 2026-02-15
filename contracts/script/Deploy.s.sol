@@ -4,6 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Script.sol";
 import "../src/HashDropEscrow.sol";
 import "../src/ReputationSBT.sol";
+import "../src/verifiers/DeliveryVerifier.sol";
 import "../src/mocks/MockUSDC.sol";
 
 contract DeployScript is Script {
@@ -15,20 +16,25 @@ contract DeployScript is Script {
 
         vm.startBroadcast(deployerPrivateKey);
 
-        // 1. Deploy ReputationSBT
+        // 1. Deploy DeliveryVerifier (ZK proof verifier)
+        DeliveryVerifier verifier = new DeliveryVerifier();
+        console.log("DeliveryVerifier deployed at:", address(verifier));
+
+        // 2. Deploy ReputationSBT
         ReputationSBT reputation = new ReputationSBT();
         console.log("ReputationSBT deployed at:", address(reputation));
 
-        // 2. Deploy HashDropEscrow
+        // 3. Deploy HashDropEscrow
         HashDropEscrow escrow = new HashDropEscrow(
             usdcAddress,
             address(reputation),
             treasury,
-            insurancePool
+            insurancePool,
+            address(verifier)
         );
         console.log("HashDropEscrow deployed at:", address(escrow));
 
-        // 3. Grant ESCROW_ROLE to HashDropEscrow
+        // 4. Grant ESCROW_ROLE to HashDropEscrow
         reputation.grantEscrowRole(address(escrow));
         console.log("ESCROW_ROLE granted to HashDropEscrow");
 
@@ -37,6 +43,7 @@ contract DeployScript is Script {
         // Log summary
         console.log("\n=== Deployment Summary ===");
         console.log("Network:", block.chainid);
+        console.log("DeliveryVerifier:", address(verifier));
         console.log("ReputationSBT:", address(reputation));
         console.log("HashDropEscrow:", address(escrow));
         console.log("Treasury:", treasury);
@@ -55,27 +62,32 @@ contract DeployTestnet is Script {
         MockUSDC usdc = new MockUSDC();
         console.log("MockUSDC deployed at:", address(usdc));
 
-        // 2. Deploy ReputationSBT
+        // 2. Deploy DeliveryVerifier (ZK proof verifier)
+        DeliveryVerifier verifierContract = new DeliveryVerifier();
+        console.log("DeliveryVerifier deployed at:", address(verifierContract));
+
+        // 3. Deploy ReputationSBT
         ReputationSBT reputation = new ReputationSBT();
         console.log("ReputationSBT deployed at:", address(reputation));
 
-        // 3. Use deployer as treasury and insurance for testnet
+        // 4. Use deployer as treasury and insurance for testnet
         address deployer = vm.addr(deployerPrivateKey);
 
-        // 4. Deploy HashDropEscrow
+        // 5. Deploy HashDropEscrow
         HashDropEscrow escrow = new HashDropEscrow(
             address(usdc),
             address(reputation),
             deployer, // treasury
-            deployer  // insurance pool
+            deployer, // insurance pool
+            address(verifierContract)
         );
         console.log("HashDropEscrow deployed at:", address(escrow));
 
-        // 5. Grant ESCROW_ROLE
+        // 6. Grant ESCROW_ROLE
         reputation.grantEscrowRole(address(escrow));
         console.log("ESCROW_ROLE granted to HashDropEscrow");
 
-        // 6. Mint some USDC to deployer for testing
+        // 7. Mint some USDC to deployer for testing
         usdc.mint(deployer, 100_000e6); // 100k USDC
         console.log("Minted 100,000 USDC to deployer");
 
@@ -85,6 +97,7 @@ contract DeployTestnet is Script {
         console.log("\n=== Testnet Deployment Summary ===");
         console.log("Network:", block.chainid);
         console.log("MockUSDC:", address(usdc));
+        console.log("DeliveryVerifier:", address(verifierContract));
         console.log("ReputationSBT:", address(reputation));
         console.log("HashDropEscrow:", address(escrow));
     }

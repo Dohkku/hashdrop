@@ -6,6 +6,7 @@ import "../../src/HashDropEscrow.sol";
 import "../../src/test/HashDropEscrowHarness.sol";
 import "../../src/ReputationSBT.sol";
 import "../../src/mocks/MockUSDC.sol";
+import "../../src/verifiers/DeliveryVerifier.sol";
 
 /**
  * @title FullLifecycleTest
@@ -16,6 +17,7 @@ contract FullLifecycleTest is Test {
     HashDropEscrowHarness public escrow;
     ReputationSBT public reputation;
     MockUSDC public usdc;
+    DeliveryVerifierMock public verifier;
 
     address public owner = address(this);
     address public treasury = address(0x100);
@@ -27,8 +29,12 @@ contract FullLifecycleTest is Test {
 
     uint256 public constant PACKAGE_VALUE = 50e6; // 50 USDC
     uint256 public constant DELIVERY_FEE = 10e6; // 10 USDC
-    bytes32 public secretHash;
-    string public constant SECRET = "secret123";
+    bytes32 public secretHash = bytes32(uint256(12345));
+
+    // Dummy proof params (mock verifier always returns true)
+    uint256[2] internal dummyA = [uint256(0), uint256(0)];
+    uint256[2][2] internal dummyB = [[uint256(0), uint256(0)], [uint256(0), uint256(0)]];
+    uint256[2] internal dummyC = [uint256(0), uint256(0)];
 
     // Pre-calculated values
     uint256 public protocolFee;
@@ -48,19 +54,18 @@ contract FullLifecycleTest is Test {
         // Deploy contracts
         usdc = new MockUSDC();
         reputation = new ReputationSBT();
+        verifier = new DeliveryVerifierMock();
 
         escrow = new HashDropEscrowHarness(
             address(usdc),
             address(reputation),
             treasury,
-            insurancePool
+            insurancePool,
+            address(verifier)
         );
 
         // Grant escrow role to escrow contract
         reputation.grantEscrowRole(address(escrow));
-
-        // Setup secret hash
-        secretHash = keccak256(abi.encodePacked(SECRET));
 
         // Pre-calculate fees
         protocolFee = (PACKAGE_VALUE * 100) / 10000; // 1%
@@ -93,13 +98,7 @@ contract FullLifecycleTest is Test {
     // ============ TEST 1: Happy Path Complete ============
 
     /**
-     * @notice Test complete happy path: create → accept → pickup → deliver
-     * GIVEN: Emitter, Courier, Receiver registered with reputation
-     * WHEN: Emitter creates order → Courier accepts → Courier confirms pickup → Courier delivers
-     * THEN:
-     *   - Funds distributed correctly (courier: fee + collateral, receiver: 0, emitter: packageValue)
-     *   - Reputation of courier incremented
-     *   - Final state = DELIVERED
+     * @notice Test complete happy path: create -> accept -> pickup -> deliver
      */
     function test_E2E_CreateAcceptPickupDeliver() public {
         // Track initial balances
@@ -147,9 +146,9 @@ contract FullLifecycleTest is Test {
         order = escrow.getOrder(orderId);
         assertEq(uint8(order.state), uint8(IHashDropEscrow.OrderState.PICKED_UP), "State should be PICKED_UP");
 
-        // STEP 4: Courier delivers (provides secret)
+        // STEP 4: Courier delivers with ZK proof
         vm.prank(courier);
-        escrow.confirmDelivery(orderId, SECRET);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
 
         // Verify final state
         order = escrow.getOrder(orderId);
@@ -183,48 +182,27 @@ contract FullLifecycleTest is Test {
 
     // ============ TEST 2: Dispute resolved for emitter ============
 
-    /**
-     * @notice Test dispute resolved in favor of emitter
-     * GIVEN: Order in state PICKED_UP (or LOCKED)
-     * WHEN: Emitter initiates dispute → Admin resolves for emitter
-     * THEN:
-     *   - Emitter receives: packageValue + deliveryFee + courierCollateral
-     *   - Courier loses collateral
-     *   - Courier reputation penalized
-     */
     function test_E2E_DisputeResolvedForEmitter() public {
-        // Setup: Create and accept order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         vm.prank(courier);
         escrow.acceptOrder(orderId);
 
-        // Track balances after acceptance
         uint256 emitterBalanceBefore = usdc.balanceOf(emitter);
         uint256 courierScoreBefore = reputation.getReputationScore(courier);
 
-        // Emitter initiates dispute
         vm.prank(emitter);
         escrow.initiateDispute(orderId, "Package damaged");
 
         IHashDropEscrow.Order memory order = escrow.getOrder(orderId);
         assertEq(uint8(order.state), uint8(IHashDropEscrow.OrderState.DISPUTED), "State should be DISPUTED");
 
-        // Grant dispute resolver role to owner
         escrow.grantRole(escrow.DISPUTE_RESOLVER_ROLE(), owner);
-
-        // Resolve dispute for emitter
         escrow.resolveDisputeForEmitter(orderId);
 
-        // Verify emitter receives full compensation
         uint256 emitterBalanceAfter = usdc.balanceOf(emitter);
         uint256 expectedRefund = PACKAGE_VALUE + DELIVERY_FEE + collateral;
         assertEq(
@@ -233,60 +211,33 @@ contract FullLifecycleTest is Test {
             "Emitter should receive packageValue + deliveryFee + collateral"
         );
 
-        // Verify courier reputation penalized
         uint256 courierScoreAfter = reputation.getReputationScore(courier);
         assertLt(courierScoreAfter, courierScoreBefore, "Courier score should decrease");
-
-        // Verify the penalty amount
-        // DISPUTE_PENALTY = 200, FAILURE_PENALTY = 50
-        // But score floors at 0, so actual penalty is min(courierScoreBefore, 200 + 50)
-        // Initial score is 100, so penalty is capped at 100
-        // Score should be 0 (floored) since penalty (250) > initial score (100)
         assertEq(courierScoreAfter, 0, "Courier score should floor at 0");
     }
 
     // ============ TEST 3: Dispute resolved for courier ============
 
-    /**
-     * @notice Test dispute resolved in favor of courier
-     * GIVEN: Order in state DISPUTED
-     * WHEN: Admin resolves for courier
-     * THEN:
-     *   - Funds released as if successful delivery
-     *   - Emitter receives dispute penalty
-     */
     function test_E2E_DisputeResolvedForCourier() public {
-        // Setup: Create, accept and pickup order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         vm.prank(courier);
         escrow.acceptOrder(orderId);
-
-        // Set to picked up state
         escrow.setOrderState(orderId, IHashDropEscrow.OrderState.PICKED_UP);
 
-        // Track balances
         uint256 courierBalanceBefore = usdc.balanceOf(courier);
         uint256 emitterBalanceBefore = usdc.balanceOf(emitter);
         uint256 emitterScoreBefore = reputation.getReputationScore(emitter);
 
-        // Emitter initiates dispute (falsely)
         vm.prank(emitter);
         escrow.initiateDispute(orderId, "False claim");
 
-        // Grant dispute resolver role and resolve for courier
         escrow.grantRole(escrow.DISPUTE_RESOLVER_ROLE(), owner);
         escrow.resolveDisputeForCourier(orderId);
 
-        // Verify funds released to courier
         uint256 courierBalanceAfter = usdc.balanceOf(courier);
         assertEq(
             courierBalanceAfter - courierBalanceBefore,
@@ -294,7 +245,6 @@ contract FullLifecycleTest is Test {
             "Courier should receive collateral + fee"
         );
 
-        // Verify emitter receives package value back
         uint256 emitterBalanceAfter = usdc.balanceOf(emitter);
         assertEq(
             emitterBalanceAfter - emitterBalanceBefore,
@@ -302,44 +252,26 @@ contract FullLifecycleTest is Test {
             "Emitter should receive packageValue"
         );
 
-        // Verify emitter reputation penalized
         uint256 emitterScoreAfter = reputation.getReputationScore(emitter);
         assertLt(emitterScoreAfter, emitterScoreBefore, "Emitter score should decrease");
     }
 
     // ============ TEST 4: Order expired and claimed ============
 
-    /**
-     * @notice Test expired order can be claimed by emitter
-     * GIVEN: Order OPEN for more than 24 hours
-     * WHEN: Emitter calls claimExpiredOrder
-     * THEN: Emitter receives full refund (packageValue + deliveryFee)
-     */
     function test_E2E_OrderExpiredAndClaimed() public {
-        // Create order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         uint256 emitterBalanceBefore = usdc.balanceOf(emitter);
 
-        // Fast forward past expiry (24 hours + 1 second)
         vm.warp(block.timestamp + 24 hours + 1);
-
-        // Verify order is expired
         assertTrue(escrow.isOrderExpired(orderId), "Order should be expired");
 
-        // Claim expired order
         vm.prank(emitter);
         escrow.claimExpiredOrder(orderId);
 
-        // Verify refund
         uint256 emitterBalanceAfter = usdc.balanceOf(emitter);
         uint256 expectedRefund = PACKAGE_VALUE + DELIVERY_FEE;
         assertEq(
@@ -348,35 +280,20 @@ contract FullLifecycleTest is Test {
             "Emitter should receive full refund"
         );
 
-        // Verify state
         IHashDropEscrow.Order memory order = escrow.getOrder(orderId);
         assertEq(uint8(order.state), uint8(IHashDropEscrow.OrderState.EXPIRED), "State should be EXPIRED");
     }
 
-    // ============ TEST 5: Courier cannot accept expired order ============
+    // ============ TEST 5: Cannot accept expired order ============
 
-    /**
-     * @notice Test courier cannot accept an expired order
-     * GIVEN: Order OPEN for more than 24 hours
-     * WHEN: Courier attempts to accept
-     * THEN: Transaction reverts with OrderExpiredError
-     */
     function test_E2E_CannotAcceptExpiredOrder() public {
-        // Create order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
-        // Fast forward past expiry
         vm.warp(block.timestamp + 25 hours);
 
-        // Attempt to accept - should fail
         vm.prank(courier);
         vm.expectRevert(IHashDropEscrow.OrderExpiredError.selector);
         escrow.acceptOrder(orderId);
@@ -384,44 +301,24 @@ contract FullLifecycleTest is Test {
 
     // ============ TEST 6: Pickup timeout ============
 
-    /**
-     * @notice Test pickup timeout handling
-     * GIVEN: Order LOCKED for more than 2 hours without pickup
-     * WHEN: Courier attempts to confirm pickup
-     * THEN: Transaction reverts with PickupTimeout
-     */
     function test_E2E_PickupTimeout() public {
-        // Create and accept order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         vm.prank(courier);
         escrow.acceptOrder(orderId);
 
-        // Fast forward past pickup timeout (2 hours + 1 second)
         vm.warp(block.timestamp + 2 hours + 1);
 
-        // Create a valid signature (for the current time window)
         bytes32 messageHash = keccak256(
-            abi.encodePacked(
-                orderId,
-                "PICKUP",
-                courier,
-                block.timestamp / 1 hours
-            )
+            abi.encodePacked(orderId, "PICKUP", courier, block.timestamp / 1 hours)
         );
         bytes32 ethSignedHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(EMITTER_PRIVATE_KEY, ethSignedHash);
         bytes memory signature = abi.encodePacked(r, s, v);
 
-        // Attempt to confirm pickup - should fail due to timeout
         vm.prank(courier);
         vm.expectRevert(IHashDropEscrow.PickupTimeout.selector);
         escrow.confirmPickup(orderId, signature);
@@ -429,67 +326,38 @@ contract FullLifecycleTest is Test {
 
     // ============ TEST 7: Delivery timeout ============
 
-    /**
-     * @notice Test delivery timeout handling
-     * GIVEN: Order PICKED_UP for more than 6 hours without delivery
-     * WHEN: Courier attempts to confirm delivery
-     * THEN: Transaction reverts with DeliveryTimeout
-     */
     function test_E2E_DeliveryTimeout() public {
-        // Create, accept and pickup order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         vm.prank(courier);
         escrow.acceptOrder(orderId);
 
-        // Set to picked up with timestamp
         escrow.setOrderState(orderId, IHashDropEscrow.OrderState.PICKED_UP);
         escrow.setPickedUpAt(orderId, block.timestamp);
 
-        // Fast forward past delivery timeout (6 hours + 1 second)
         vm.warp(block.timestamp + 6 hours + 1);
 
-        // Attempt to deliver - should fail due to timeout
         vm.prank(courier);
         vm.expectRevert(IHashDropEscrow.DeliveryTimeout.selector);
-        escrow.confirmDelivery(orderId, SECRET);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
     }
 
     // ============ TEST 8: Multiple orders by same emitter ============
 
-    /**
-     * @notice Test emitter can have multiple concurrent orders
-     */
     function test_E2E_MultipleOrdersSameEmitter() public {
-        // Create multiple orders
         vm.startPrank(emitter);
         uint256 orderId1 = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(uint256(1)),
-            "QmTest1"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(uint256(1)), "QmTest1"
         );
         uint256 orderId2 = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE * 2,
-            DELIVERY_FEE * 2,
-            keccak256("secret2"),
-            bytes32(uint256(2)),
-            "QmTest2"
+            receiver, PACKAGE_VALUE * 2, DELIVERY_FEE * 2,
+            bytes32(uint256(67890)), bytes32(uint256(2)), "QmTest2"
         );
         vm.stopPrank();
 
-        // Verify both orders exist
         uint256[] memory userOrders = escrow.getUserOrders(emitter);
         assertEq(userOrders.length, 2, "Emitter should have 2 orders");
         assertEq(userOrders[0], orderId1, "First order ID should match");
@@ -498,51 +366,31 @@ contract FullLifecycleTest is Test {
 
     // ============ TEST 9: Complete flow with proper signature ============
 
-    /**
-     * @notice Test complete flow with actual emitter signature for pickup
-     */
     function test_E2E_CompleteFlowWithSignature() public {
-        // Create order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
-        // Courier accepts
         vm.prank(courier);
         escrow.acceptOrder(orderId);
 
-        // Create emitter signature for pickup
         bytes32 messageHash = keccak256(
-            abi.encodePacked(
-                orderId,
-                "PICKUP",
-                courier,
-                block.timestamp / 1 hours
-            )
+            abi.encodePacked(orderId, "PICKUP", courier, block.timestamp / 1 hours)
         );
         bytes32 ethSignedHash = MessageHashUtils.toEthSignedMessageHash(messageHash);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(EMITTER_PRIVATE_KEY, ethSignedHash);
         bytes memory signature = abi.encodePacked(r, s, v);
 
-        // Courier confirms pickup with signature
         vm.prank(courier);
         escrow.confirmPickup(orderId, signature);
 
-        // Verify state is PICKED_UP
         IHashDropEscrow.Order memory order = escrow.getOrder(orderId);
         assertEq(uint8(order.state), uint8(IHashDropEscrow.OrderState.PICKED_UP), "State should be PICKED_UP");
 
-        // Courier delivers
         vm.prank(courier);
-        escrow.confirmDelivery(orderId, SECRET);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
 
-        // Verify state is DELIVERED
         order = escrow.getOrder(orderId);
         assertEq(uint8(order.state), uint8(IHashDropEscrow.OrderState.DELIVERED), "State should be DELIVERED");
     }

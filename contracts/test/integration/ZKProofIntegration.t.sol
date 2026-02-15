@@ -6,21 +6,24 @@ import "../../src/HashDropEscrow.sol";
 import "../../src/test/HashDropEscrowHarness.sol";
 import "../../src/ReputationSBT.sol";
 import "../../src/mocks/MockUSDC.sol";
+import "../../src/verifiers/DeliveryVerifier.sol";
 import "../../src/interfaces/IDeliveryVerifier.sol";
 
 /**
  * @title ZKProofIntegrationTest
  * @notice Integration tests for ZK proof verification in delivery flow
- * @dev These tests use a mock verifier until the real one is generated
+ * @dev Tests use a mock verifier. The real verifier is generated from the
+ *      DeliveryProof.circom circuit using snarkjs.
  *
  * The ZK proof system works as follows:
- * 1. Receiver generates a secret and computes secretHash = Poseidon(secret)
+ * 1. Sender generates a secret and computes secretHash = Poseidon(secret)
  * 2. secretHash is stored in the smart contract when order is created
  * 3. Receiver shows QR code containing the secret
  * 4. Courier scans QR, generates ZK proof proving knowledge of secret
  * 5. Proof is verified on-chain without revealing the actual secret
  *
- * Public inputs for the proof:
+ * Public signals for the proof:
+ * - valid: Circuit output (must be 1)
  * - secretHash: Hash stored in contract
  * - orderId: Binds proof to specific order
  * - courierAddress: Prevents proof theft
@@ -29,7 +32,7 @@ contract ZKProofIntegrationTest is Test {
     HashDropEscrowHarness public escrow;
     ReputationSBT public reputation;
     MockUSDC public usdc;
-    MockDeliveryVerifier public verifier;
+    DeliveryVerifierMock public verifier;
 
     address public owner = address(this);
     address public treasury = address(0x100);
@@ -42,29 +45,30 @@ contract ZKProofIntegrationTest is Test {
     uint256 public constant PACKAGE_VALUE = 50e6;
     uint256 public constant DELIVERY_FEE = 10e6;
 
-    // Test values for ZK proof
-    uint256 public constant TEST_SECRET = 12345678901234567890;
-    bytes32 public secretHash;
+    // Secret hash (would be Poseidon hash in production)
+    bytes32 public secretHash = bytes32(uint256(12345));
+
+    // Dummy proof params (mock verifier always returns true)
+    uint256[2] internal dummyA = [uint256(0), uint256(0)];
+    uint256[2][2] internal dummyB = [[uint256(0), uint256(0)], [uint256(0), uint256(0)]];
+    uint256[2] internal dummyC = [uint256(0), uint256(0)];
 
     function setUp() public {
         // Deploy contracts
         usdc = new MockUSDC();
         reputation = new ReputationSBT();
-        verifier = new MockDeliveryVerifier();
+        verifier = new DeliveryVerifierMock();
 
         escrow = new HashDropEscrowHarness(
             address(usdc),
             address(reputation),
             treasury,
-            insurancePool
+            insurancePool,
+            address(verifier)
         );
 
         // Grant escrow role
         reputation.grantEscrowRole(address(escrow));
-
-        // Setup: For ZK proofs, we would use Poseidon hash
-        // For these tests, we use keccak256 (current contract implementation)
-        secretHash = keccak256(abi.encodePacked("secret123"));
 
         // Mint and approve
         usdc.mint(emitter, 10000e6);
@@ -85,26 +89,13 @@ contract ZKProofIntegrationTest is Test {
         usdc.approve(address(escrow), type(uint256).max);
     }
 
-    // ============ TEST 1: Valid secret releases funds ============
+    // ============ TEST 1: Valid proof releases funds ============
 
-    /**
-     * @notice Test that valid secret verification releases funds
-     * GIVEN: Order in PICKED_UP state with secretHash = keccak256(secret)
-     * WHEN: Courier provides the correct secret
-     * THEN: Funds are released
-     */
-    function test_ValidSecret_ReleaseFunds() public {
-        string memory secret = "secret123";
-
+    function test_ValidProof_ReleaseFunds() public {
         // Create order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         // Accept and pickup
@@ -115,9 +106,9 @@ contract ZKProofIntegrationTest is Test {
         // Track balances
         uint256 courierBalanceBefore = usdc.balanceOf(courier);
 
-        // Deliver with correct secret
+        // Deliver with valid proof (mock verifier returns true)
         vm.prank(courier);
-        escrow.confirmDelivery(orderId, secret);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
 
         // Verify delivery completed
         IHashDropEscrow.Order memory order = escrow.getOrder(orderId);
@@ -132,24 +123,13 @@ contract ZKProofIntegrationTest is Test {
         );
     }
 
-    // ============ TEST 2: Invalid secret is rejected ============
+    // ============ TEST 2: Invalid proof is rejected ============
 
-    /**
-     * @notice Test that invalid secret is rejected
-     * GIVEN: Order in PICKED_UP state
-     * WHEN: Courier provides incorrect secret
-     * THEN: Transaction reverts with "Invalid proof"
-     */
-    function test_InvalidSecret_Rejected() public {
+    function test_InvalidProof_Rejected() public {
         // Create order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         // Accept and pickup
@@ -157,43 +137,28 @@ contract ZKProofIntegrationTest is Test {
         escrow.acceptOrder(orderId);
         escrow.setOrderState(orderId, IHashDropEscrow.OrderState.PICKED_UP);
 
-        // Try to deliver with wrong secret
+        // Configure mock verifier to reject
+        verifier.setVerificationResult(false);
+
+        // Try to deliver with invalid proof
         vm.prank(courier);
-        vm.expectRevert(IHashDropEscrow.InvalidSecret.selector);
-        escrow.confirmDelivery(orderId, "wrongsecret");
+        vm.expectRevert(IHashDropEscrow.InvalidProof.selector);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
     }
 
-    // ============ TEST 3: Secret replay attack prevention ============
+    // ============ TEST 3: Proof binding - different orders get different hashes ============
 
-    /**
-     * @notice Test that secrets cannot be reused across orders
-     * GIVEN: Two orders with different secretHashes
-     * WHEN: Attacker tries to use secret from order 1 on order 2
-     * THEN: Transaction fails because hashes don't match
-     */
-    function test_SecretReplayAttack_Blocked() public {
-        string memory secret1 = "secret123";
-        string memory secret2 = "differentsecret";
-        bytes32 secretHash1 = keccak256(abi.encodePacked(secret1));
-        bytes32 secretHash2 = keccak256(abi.encodePacked(secret2));
+    function test_DifferentOrders_DifferentHashes() public {
+        bytes32 secretHash1 = bytes32(uint256(11111));
+        bytes32 secretHash2 = bytes32(uint256(22222));
 
-        // Create two orders with different secrets
+        // Create two orders with different secret hashes
         vm.startPrank(emitter);
         uint256 orderId1 = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash1,
-            bytes32(uint256(1)),
-            "QmTest1"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash1, bytes32(uint256(1)), "QmTest1"
         );
         uint256 orderId2 = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash2,
-            bytes32(uint256(2)),
-            "QmTest2"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash2, bytes32(uint256(2)), "QmTest2"
         );
         vm.stopPrank();
 
@@ -207,40 +172,28 @@ contract ZKProofIntegrationTest is Test {
         escrow.setOrderState(orderId1, IHashDropEscrow.OrderState.PICKED_UP);
         escrow.setOrderState(orderId2, IHashDropEscrow.OrderState.PICKED_UP);
 
-        // Complete order 1 with its secret
+        // Complete order 1
         vm.prank(courier);
-        escrow.confirmDelivery(orderId1, secret1);
+        escrow.confirmDelivery(orderId1, dummyA, dummyB, dummyC);
 
-        // Try to use secret1 on order2 - should fail
+        // Complete order 2
         vm.prank(courier);
-        vm.expectRevert(IHashDropEscrow.InvalidSecret.selector);
-        escrow.confirmDelivery(orderId2, secret1);
+        escrow.confirmDelivery(orderId2, dummyA, dummyB, dummyC);
 
-        // Correct secret works for order 2
-        vm.prank(courier);
-        escrow.confirmDelivery(orderId2, secret2);
+        // Verify both delivered
+        IHashDropEscrow.Order memory order1 = escrow.getOrder(orderId1);
+        IHashDropEscrow.Order memory order2 = escrow.getOrder(orderId2);
+        assertEq(uint8(order1.state), uint8(IHashDropEscrow.OrderState.DELIVERED));
+        assertEq(uint8(order2.state), uint8(IHashDropEscrow.OrderState.DELIVERED));
     }
 
     // ============ TEST 4: Only assigned courier can deliver ============
 
-    /**
-     * @notice Test that only the assigned courier can confirm delivery
-     * GIVEN: Order assigned to courier A
-     * WHEN: Courier B tries to confirm delivery with valid secret
-     * THEN: Transaction reverts with Unauthorized
-     */
     function test_OnlyAssignedCourier_CanDeliver() public {
-        string memory secret = "secret123";
-
         // Create order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         // Courier accepts
@@ -256,123 +209,63 @@ contract ZKProofIntegrationTest is Test {
         // Courier2 tries to deliver - should fail
         vm.prank(courier2);
         vm.expectRevert(IHashDropEscrow.Unauthorized.selector);
-        escrow.confirmDelivery(orderId, secret);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
     }
 
-    // ============ TEST 5: Same secret with different hash fails ============
+    // ============ TEST 5: Verifier toggling for testing ============
 
-    /**
-     * @notice Test that hash must match stored hash exactly
-     */
-    function test_HashMismatch_Fails() public {
-        // Create order with one hash
-        bytes32 storedHash = keccak256(abi.encodePacked("actualSecret"));
-
+    function test_VerifierToggle() public {
+        // Create order
         vm.prank(emitter);
         uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            storedHash,
-            bytes32(0),
-            "QmTest"
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
         );
 
         vm.prank(courier);
         escrow.acceptOrder(orderId);
         escrow.setOrderState(orderId, IHashDropEscrow.OrderState.PICKED_UP);
 
-        // Try with secret that hashes to different value
-        vm.prank(courier);
-        vm.expectRevert(IHashDropEscrow.InvalidSecret.selector);
-        escrow.confirmDelivery(orderId, "wrongSecret");
-    }
-
-    // ============ TEST 6: Empty secret fails ============
-
-    /**
-     * @notice Test that empty string fails if hash doesn't match
-     */
-    function test_EmptySecret_Fails() public {
-        // Create order (secretHash is for "secret123", not empty string)
-        vm.prank(emitter);
-        uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            secretHash,
-            bytes32(0),
-            "QmTest"
-        );
+        // Set verifier to reject
+        verifier.setVerificationResult(false);
 
         vm.prank(courier);
-        escrow.acceptOrder(orderId);
-        escrow.setOrderState(orderId, IHashDropEscrow.OrderState.PICKED_UP);
+        vm.expectRevert(IHashDropEscrow.InvalidProof.selector);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
 
-        // Try with empty secret
-        vm.prank(courier);
-        vm.expectRevert(IHashDropEscrow.InvalidSecret.selector);
-        escrow.confirmDelivery(orderId, "");
-    }
-
-    // ============ TEST 7: Large secret value ============
-
-    /**
-     * @notice Test delivery with large secret value
-     */
-    function test_LargeSecret_Works() public {
-        // Create a large secret
-        string memory largeSecret = "this_is_a_very_long_secret_value_that_tests_handling_of_large_inputs_12345678901234567890";
-        bytes32 largeSecretHash = keccak256(abi.encodePacked(largeSecret));
-
-        vm.prank(emitter);
-        uint256 orderId = escrow.createOrder(
-            receiver,
-            PACKAGE_VALUE,
-            DELIVERY_FEE,
-            largeSecretHash,
-            bytes32(0),
-            "QmTest"
-        );
+        // Set verifier to accept
+        verifier.setVerificationResult(true);
 
         vm.prank(courier);
-        escrow.acceptOrder(orderId);
-        escrow.setOrderState(orderId, IHashDropEscrow.OrderState.PICKED_UP);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
 
-        // Deliver with large secret
-        vm.prank(courier);
-        escrow.confirmDelivery(orderId, largeSecret);
-
-        // Verify delivered
         IHashDropEscrow.Order memory order = escrow.getOrder(orderId);
         assertEq(uint8(order.state), uint8(IHashDropEscrow.OrderState.DELIVERED));
     }
-}
 
-/**
- * @title MockDeliveryVerifier
- * @notice Mock verifier for testing ZK proof integration
- * @dev Will be replaced by real verifier generated from circuit
- */
-contract MockDeliveryVerifier is IDeliveryVerifier {
-    // Track which proofs have been used (for replay protection)
-    mapping(bytes32 => bool) public usedProofs;
+    // ============ TEST 6: Delivery timeout still applies with ZK proofs ============
 
-    // Control verification result for testing
-    bool public shouldVerify = true;
+    function test_DeliveryTimeout_WithZKProof() public {
+        vm.prank(emitter);
+        uint256 orderId = escrow.createOrder(
+            receiver, PACKAGE_VALUE, DELIVERY_FEE, secretHash, bytes32(0), "QmTest"
+        );
 
-    function setVerificationResult(bool result) external {
-        shouldVerify = result;
+        vm.prank(courier);
+        escrow.acceptOrder(orderId);
+        escrow.setOrderState(orderId, IHashDropEscrow.OrderState.PICKED_UP);
+        escrow.setPickedUpAt(orderId, block.timestamp);
+
+        // Fast forward past delivery timeout
+        vm.warp(block.timestamp + 6 hours + 1);
+
+        vm.prank(courier);
+        vm.expectRevert(IHashDropEscrow.DeliveryTimeout.selector);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
     }
 
-    function verifyProof(
-        uint256[2] calldata _pA,
-        uint256[2][2] calldata _pB,
-        uint256[2] calldata _pC,
-        uint256[3] calldata _pubSignals
-    ) external view override returns (bool) {
-        // In mock, we just return the configured result
-        // Real verifier would do actual cryptographic verification
-        return shouldVerify;
+    // ============ TEST 7: Verifier contract is properly referenced ============
+
+    function test_VerifierContractAddress() public view {
+        assertEq(address(escrow.verifier()), address(verifier));
     }
 }

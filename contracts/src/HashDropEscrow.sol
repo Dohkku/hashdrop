@@ -10,6 +10,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "./interfaces/IHashDropEscrow.sol";
 import "./interfaces/IReputationSBT.sol";
+import "./interfaces/IDeliveryVerifier.sol";
 
 /// @title HashDropEscrow - Contrato principal de escrow para delivery P2P
 /// @notice Gestiona depositos, colaterales y liberacion de fondos para entregas
@@ -35,6 +36,7 @@ contract HashDropEscrow is IHashDropEscrow, ReentrancyGuard, Pausable, AccessCon
     // ============ Immutables ============
     IERC20 public immutable stablecoin;
     IReputationSBT public immutable reputation;
+    IDeliveryVerifier public immutable verifier;
 
     // ============ State Variables ============
     address public treasury;
@@ -50,19 +52,22 @@ contract HashDropEscrow is IHashDropEscrow, ReentrancyGuard, Pausable, AccessCon
         address _stablecoin,
         address _reputation,
         address _treasury,
-        address _insurancePool
+        address _insurancePool,
+        address _verifier
     ) {
         if (
             _stablecoin == address(0) ||
             _reputation == address(0) ||
             _treasury == address(0) ||
-            _insurancePool == address(0)
+            _insurancePool == address(0) ||
+            _verifier == address(0)
         ) {
             revert ZeroAddress();
         }
 
         stablecoin = IERC20(_stablecoin);
         reputation = IReputationSBT(_reputation);
+        verifier = IDeliveryVerifier(_verifier);
         treasury = _treasury;
         insurancePool = _insurancePool;
 
@@ -219,12 +224,16 @@ contract HashDropEscrow is IHashDropEscrow, ReentrancyGuard, Pausable, AccessCon
         emit PackagePickedUp(orderId, block.timestamp);
     }
 
-    /// @notice Confirmar entrega con el secreto del receptor
+    /// @notice Confirmar entrega con prueba ZK
     /// @param orderId ID de la orden
-    /// @param secret Secreto revelado por el receptor (texto plano)
+    /// @param pA Proof element A (G1 point)
+    /// @param pB Proof element B (G2 point)
+    /// @param pC Proof element C (G1 point)
     function confirmDelivery(
         uint256 orderId,
-        string calldata secret
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC
     ) external nonReentrant {
         Order storage order = _orders[orderId];
 
@@ -238,9 +247,18 @@ contract HashDropEscrow is IHashDropEscrow, ReentrancyGuard, Pausable, AccessCon
             revert DeliveryTimeout();
         }
 
-        // Verificar que el secreto coincide con el hash
-        bytes32 computedHash = keccak256(abi.encodePacked(secret));
-        if (computedHash != order.secretHash) revert InvalidSecret();
+        // Construir public signals: [valid, secretHash, orderId, courierAddress]
+        uint256[4] memory pubSignals = [
+            uint256(1), // valid output must be 1
+            uint256(order.secretHash), // Poseidon hash stored at order creation
+            orderId,
+            uint256(uint160(msg.sender)) // courier address as uint256
+        ];
+
+        // Verificar prueba ZK
+        if (!verifier.verifyProof(pA, pB, pC, pubSignals)) {
+            revert InvalidProof();
+        }
 
         order.state = OrderState.DELIVERED;
 

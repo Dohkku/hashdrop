@@ -84,7 +84,9 @@ export const ESCROW_ABI = [
   {
     inputs: [
       { name: "orderId", type: "uint256" },
-      { name: "secret", type: "string" },
+      { name: "pA", type: "uint256[2]" },
+      { name: "pB", type: "uint256[2][2]" },
+      { name: "pC", type: "uint256[2]" },
     ],
     name: "confirmDelivery",
     outputs: [],

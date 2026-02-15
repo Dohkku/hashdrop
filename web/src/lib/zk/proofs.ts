@@ -118,7 +118,7 @@ export async function generateDeliveryProof(
     b: [[string, string], [string, string]];
     c: [string, string];
   };
-  publicSignals: [string, string, string];
+  publicSignals: [string, string, string, string];
 }> {
   // Dynamically import snarkjs (it's heavy, only load when needed)
   const snarkjs = await import("snarkjs");
@@ -154,7 +154,7 @@ export async function generateDeliveryProof(
       ] as [[string, string], [string, string]],
       c: [proof.pi_c[0], proof.pi_c[1]] as [string, string],
     },
-    publicSignals: publicSignals as [string, string, string],
+    publicSignals: publicSignals as [string, string, string, string],
   };
 }
 

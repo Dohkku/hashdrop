@@ -83,7 +83,12 @@ interface IHashDropEscrow {
 
     function confirmPickup(uint256 orderId, bytes calldata emitterSignature) external;
 
-    function confirmDelivery(uint256 orderId, string calldata secret) external;
+    function confirmDelivery(
+        uint256 orderId,
+        uint256[2] calldata pA,
+        uint256[2][2] calldata pB,
+        uint256[2] calldata pC
+    ) external;
 
     function cancelOrder(uint256 orderId) external;
 

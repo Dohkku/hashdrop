@@ -143,7 +143,7 @@ export function useAcceptOrder() {
   };
 }
 
-// Hook to confirm delivery
+// Hook to confirm delivery with ZK proof
 export function useConfirmDelivery() {
   const chainId = useChainId();
   const { writeContract, data: hash, isPending, error } = useWriteContract();
@@ -152,12 +152,17 @@ export function useConfirmDelivery() {
     hash,
   });
 
-  const confirmDelivery = (orderId: bigint, secret: string) => {
+  const confirmDelivery = (
+    orderId: bigint,
+    pA: [bigint, bigint],
+    pB: [[bigint, bigint], [bigint, bigint]],
+    pC: [bigint, bigint]
+  ) => {
     writeContract({
       address: getContractAddress(chainId, "escrow"),
       abi: ESCROW_ABI,
       functionName: "confirmDelivery",
-      args: [orderId, secret],
+      args: [orderId, pA, pB, pC],
     });
   };
 

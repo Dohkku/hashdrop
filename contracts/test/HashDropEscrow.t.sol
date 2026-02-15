@@ -6,11 +6,13 @@ import "../src/HashDropEscrow.sol";
 import "../src/test/HashDropEscrowHarness.sol";
 import "../src/ReputationSBT.sol";
 import "../src/mocks/MockUSDC.sol";
+import "../src/verifiers/DeliveryVerifier.sol";
 
 contract HashDropEscrowTest is Test {
     HashDropEscrowHarness public escrow;
     ReputationSBT public reputation;
     MockUSDC public usdc;
+    DeliveryVerifierMock public verifier;
 
     address public owner = address(this);
     address public treasury = address(0x100);
@@ -22,8 +24,12 @@ contract HashDropEscrowTest is Test {
 
     uint256 public constant PACKAGE_VALUE = 50e6; // 50 USDC
     uint256 public constant DELIVERY_FEE = 10e6; // 10 USDC
-    bytes32 public secretHash;
-    string public constant SECRET = "secret123";
+    bytes32 public secretHash = bytes32(uint256(12345));
+
+    // Dummy proof params (mock verifier always returns true)
+    uint256[2] internal dummyA = [uint256(0), uint256(0)];
+    uint256[2][2] internal dummyB = [[uint256(0), uint256(0)], [uint256(0), uint256(0)]];
+    uint256[2] internal dummyC = [uint256(0), uint256(0)];
 
     // Events para testing
     event OrderCreated(
@@ -45,19 +51,18 @@ contract HashDropEscrowTest is Test {
         // Deploy contracts
         usdc = new MockUSDC();
         reputation = new ReputationSBT();
+        verifier = new DeliveryVerifierMock();
 
         escrow = new HashDropEscrowHarness(
             address(usdc),
             address(reputation),
             treasury,
-            insurancePool
+            insurancePool,
+            address(verifier)
         );
 
         // Grant escrow role to escrow contract
         reputation.grantEscrowRole(address(escrow));
-
-        // Setup secret hash
-        secretHash = keccak256(abi.encodePacked(SECRET));
 
         // Mint USDC to participants
         usdc.mint(emitter, 1000e6);
@@ -277,7 +282,7 @@ contract HashDropEscrowTest is Test {
         uint256 emitterBalanceBefore = usdc.balanceOf(emitter);
 
         vm.prank(courier);
-        escrow.confirmDelivery(orderId, SECRET);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
 
         IHashDropEscrow.Order memory order = escrow.getOrder(orderId);
         assertEq(uint8(order.state), uint8(IHashDropEscrow.OrderState.DELIVERED));
@@ -291,12 +296,15 @@ contract HashDropEscrowTest is Test {
         assertEq(emitterBalanceAfter - emitterBalanceBefore, PACKAGE_VALUE);
     }
 
-    function test_ConfirmDelivery_RevertIfWrongSecret() public {
+    function test_ConfirmDelivery_RevertIfInvalidProof() public {
         uint256 orderId = _createAcceptAndPickup();
 
+        // Configure mock to reject proofs
+        verifier.setVerificationResult(false);
+
         vm.prank(courier);
-        vm.expectRevert(IHashDropEscrow.InvalidSecret.selector);
-        escrow.confirmDelivery(orderId, "wrongsecret");
+        vm.expectRevert(IHashDropEscrow.InvalidProof.selector);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
     }
 
     function test_ConfirmDelivery_RevertIfNotCourier() public {
@@ -304,7 +312,7 @@ contract HashDropEscrowTest is Test {
 
         vm.prank(emitter);
         vm.expectRevert(IHashDropEscrow.Unauthorized.selector);
-        escrow.confirmDelivery(orderId, SECRET);
+        escrow.confirmDelivery(orderId, dummyA, dummyB, dummyC);
     }
 
     // ============ cancelOrder Tests ============

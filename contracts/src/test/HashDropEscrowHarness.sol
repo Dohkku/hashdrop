@@ -11,8 +11,9 @@ contract HashDropEscrowHarness is HashDropEscrow {
         address _stablecoin,
         address _reputation,
         address _treasury,
-        address _insurancePool
-    ) HashDropEscrow(_stablecoin, _reputation, _treasury, _insurancePool) {}
+        address _insurancePool,
+        address _verifier
+    ) HashDropEscrow(_stablecoin, _reputation, _treasury, _insurancePool, _verifier) {}
 
     /// @notice Test helper to set order state directly
     /// @dev Only for testing - bypasses normal flow

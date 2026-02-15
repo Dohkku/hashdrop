@@ -22,6 +22,12 @@ import {
 } from "@/hooks/useEscrow";
 import { useSignMessage } from "wagmi";
 import { keccak256, encodePacked, toHex } from "viem";
+import {
+  generateDeliveryProof,
+  formatProofForContract,
+  secretToQRData,
+  bytes32ToBigint,
+} from "@/lib/zk";
 
 export default function OrderDetailPage() {
   const params = useParams();
@@ -32,6 +38,10 @@ export default function OrderDetailPage() {
   const [timeRemaining, setTimeRemaining] = useState<string>("");
   const [showDisputeModal, setShowDisputeModal] = useState(false);
   const [disputeReason, setDisputeReason] = useState("");
+  const [deliverySecret, setDeliverySecret] = useState("");
+  const [isGeneratingProof, setIsGeneratingProof] = useState(false);
+  const [proofError, setProofError] = useState<string | null>(null);
+  const [receiverSecret, setReceiverSecret] = useState("");
 
   // Hooks for actions
   const { confirmPickup, isPending: isPendingPickup } = useConfirmPickup();
@@ -136,6 +146,36 @@ export default function OrderDetailPage() {
     if (disputeReason.trim()) {
       initiateDispute(orderId, disputeReason);
       setShowDisputeModal(false);
+    }
+  };
+
+  // Handle delivery with ZK proof
+  const handleDelivery = async () => {
+    if (!deliverySecret.trim() || !address) return;
+
+    setIsGeneratingProof(true);
+    setProofError(null);
+
+    try {
+      const secret = BigInt(deliverySecret.trim());
+      const secretHash = bytes32ToBigint(orderData.secretHash);
+
+      const { proof } = await generateDeliveryProof(
+        secret,
+        secretHash,
+        BigInt(orderId),
+        address
+      );
+
+      const { pA, pB, pC } = formatProofForContract(proof);
+      confirmDelivery(orderId, pA, pB, pC);
+    } catch (err) {
+      console.error("Proof generation error:", err);
+      setProofError(
+        err instanceof Error ? err.message : "Error al generar la prueba ZK"
+      );
+    } finally {
+      setIsGeneratingProof(false);
     }
   };
 
@@ -249,20 +289,50 @@ export default function OrderDetailPage() {
               <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
                 QR de Entrega
               </h2>
-              <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
-                Muestra este codigo al mensajero para confirmar la entrega
-              </p>
-              <div className="flex justify-center bg-white p-4 rounded-lg" data-testid="delivery-qr-code">
-                <QRCodeSVG
-                  value={JSON.stringify({
-                    orderId: orderId.toString(),
-                    receiver: orderData.receiver,
-                    secretHash: orderData.secretHash,
-                  })}
-                  size={200}
-                  level="M"
-                />
-              </div>
+              {!receiverSecret ? (
+                <>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                    Introduce el secreto que te dio el emisor para generar el QR de entrega.
+                  </p>
+                  <input
+                    type="text"
+                    placeholder="Pega el secreto aqui..."
+                    value={receiverSecret}
+                    onChange={(e) => setReceiverSecret(e.target.value)}
+                    className="w-full px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-primary-500 focus:border-transparent mb-3 text-sm"
+                  />
+                  <button
+                    onClick={() => {}} // State change triggers re-render
+                    disabled={!receiverSecret.trim()}
+                    className="w-full py-2 bg-primary-500 text-white rounded-lg hover:bg-primary-600 font-medium disabled:opacity-50"
+                  >
+                    Generar QR
+                  </button>
+                </>
+              ) : (
+                <>
+                  <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                    Muestra este codigo al mensajero para confirmar la entrega
+                  </p>
+                  <div className="flex justify-center bg-white p-4 rounded-lg" data-testid="delivery-qr-code">
+                    <QRCodeSVG
+                      value={secretToQRData(
+                        BigInt(receiverSecret),
+                        orderId.toString(),
+                        orderData.receiver
+                      )}
+                      size={200}
+                      level="M"
+                    />
+                  </div>
+                  <button
+                    onClick={() => setReceiverSecret("")}
+                    className="w-full mt-3 py-2 text-sm text-gray-500 hover:text-gray-700"
+                  >
+                    Cambiar secreto
+                  </button>
+                </>
+              )}
             </div>
           )}
 
@@ -280,6 +350,41 @@ export default function OrderDetailPage() {
                 className="w-full py-3 bg-primary-500 text-white rounded-lg hover:bg-primary-600 font-medium"
               >
                 Firmar Confirmacion de Recogida
+              </button>
+            </div>
+          )}
+
+          {/* Courier: Confirm Delivery with ZK Proof */}
+          {isCourier && state === OrderState.PICKED_UP && (
+            <div className="bg-white dark:bg-gray-800 rounded-xl p-6 border border-gray-200 dark:border-gray-700">
+              <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
+                Confirmar Entrega
+              </h2>
+              <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                Escanea el QR del receptor o introduce el secreto para generar la prueba ZK y confirmar la entrega.
+              </p>
+              <input
+                type="text"
+                placeholder="Introduce el secreto del QR..."
+                value={deliverySecret}
+                onChange={(e) => setDeliverySecret(e.target.value)}
+                className="w-full px-4 py-3 rounded-lg border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 focus:ring-2 focus:ring-primary-500 focus:border-transparent mb-3 text-sm"
+              />
+              {proofError && (
+                <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg p-3 mb-3 text-sm text-red-700 dark:text-red-400">
+                  {proofError}
+                </div>
+              )}
+              <button
+                onClick={handleDelivery}
+                disabled={!deliverySecret.trim() || isGeneratingProof || isPendingDelivery}
+                className="w-full py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 font-medium disabled:opacity-50"
+              >
+                {isGeneratingProof
+                  ? "Generando prueba ZK..."
+                  : isPendingDelivery
+                  ? "Enviando transaccion..."
+                  : "Confirmar Entrega"}
               </button>
             </div>
           )}
